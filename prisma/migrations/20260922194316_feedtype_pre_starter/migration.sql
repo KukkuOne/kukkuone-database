@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "FeedType" ADD VALUE 'PRE_STARTER';
