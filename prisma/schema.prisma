@@ -1,0 +1,1046 @@
+// KukkuOne data model — one PostgreSQL DB via Prisma.
+// See docs/06-Data-Model.md. Money = integer minor units + currency.
+// Weights/feed = grams. Partitions (core/farmer/supplier/distributor) are logical.
+
+generator client {
+  provider = "prisma-client-js"
+  // Driver adapters let the client run on a runtime that has no TCP sockets of
+  // its own — a Cloudflare Worker — by handing the connection to a driver the
+  // host does provide. The Node services are unaffected and keep using the
+  // built-in engine.
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── enums ───────────────────────────
+enum Capability {
+  FARMER
+  DISTRIBUTOR
+  SUPPLIER
+}
+
+enum PermissionAction {
+  View
+  Create
+  Edit
+  Approve
+  Dispatch
+  Settle
+  Report
+}
+
+enum Tenure {
+  OWNED
+  LEASED
+}
+
+enum RentBasis {
+  PER_MONTH
+  PER_SQFT
+  PER_BIRD_PLACED
+  PER_BATCH
+}
+
+enum GrowingModel {
+  OWN
+  CONTRACT
+}
+
+enum ShedStatus {
+  EMPTY
+  PREPARING
+  READY
+  OCCUPIED
+  RUNNING
+  HARVESTING
+  CLEANING
+  DISINFECTION
+}
+
+enum BatchStatus {
+  PLANNED
+  PLACED
+  ACTIVE
+  READY_FOR_HARVEST
+  HARVESTING
+  SOLD
+  SETTLEMENT_PENDING
+  SETTLED
+  CLOSED
+}
+
+enum SupplierOrderStatus {
+  DRAFT
+  SUBMITTED
+  RECEIVED
+  ACCEPTED
+  PROCESSING
+  READY_FOR_DISPATCH
+  DISPATCHED
+  DELIVERED
+  INVOICED
+  SETTLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum VaccinationStatus {
+  SCHEDULED
+  DUE
+  COMPLETED
+}
+
+enum FeedType {
+  PRE_STARTER
+  STARTER
+  GROWER
+  FINISHER
+}
+
+enum ExpenseCategory {
+  CHICKS
+  FEED
+  MEDICINE
+  VACCINATION
+  LABOUR
+  ELECTRICITY
+  WATER
+  TRANSPORT
+  RENT
+  LITTER
+  GAS
+  REPAIRS
+  CLEANING
+  OTHER
+}
+
+/// Who money moves to or from. A card remembers what this person charges you
+/// or pays you; it is not binding on any past transaction.
+enum PartyKind {
+  HATCHERY
+  FEED_SUPPLIER
+  MEDICINE_SUPPLIER
+  BUYER
+}
+
+/// A buyer either pays the day's market rate or a fixed agreed rate.
+enum SaleRateBasis {
+  MARKET
+  FIXED
+}
+
+/// Why feed stock moved: bought in, returned, or reconciled after a count.
+/// The ten conditions the app watches. Each names a shed, a number and an
+/// action — "mortality high" is not an alert.
+enum AlertKind {
+  NOT_LOGGED
+  MORTALITY_SPIKE
+  MORTALITY_CUMULATIVE
+  FEED_LOW
+  VACCINATION_DUE
+  WEIGHT_BEHIND
+  FCR_DRIFT
+  BATCH_READY
+  PAYMENT_OVERDUE
+  SHED_IDLE
+}
+
+/// Feed and medicine both move the same three ways.
+enum StockMovementKind {
+  PURCHASE
+  RETURN
+  ADJUSTMENT
+}
+
+enum RevenueSource {
+  BIRD
+  MANURE
+  OTHER
+}
+
+// ─────────────────────────── core ───────────────────────────
+model Organization {
+  id           String              @id @default(uuid())
+  name         String
+  capabilities Capability[]
+  baseCurrency String              @default("INR")
+  status       String              @default("active")
+  memberships  Membership[]
+  farms        Farm[]
+  products     Product[]
+  distributor  DistributorProfile?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  deletedAt    DateTime?
+}
+
+model User {
+  id          String             @id @default(uuid())
+  email       String             @unique
+  displayName String?
+  photoUrl    String?
+  status      String             @default("active")
+  identities  ExternalIdentity[]
+  memberships Membership[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+}
+
+model ExternalIdentity {
+  id        String   @id @default(uuid())
+  provider  String
+  subject   String
+  email     String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@unique([provider, subject])
+  @@index([userId])
+}
+
+model Membership {
+  id              String       @id @default(uuid())
+  userId          String
+  orgId           String
+  roleId          String
+  capabilityScope Capability
+  user            User         @relation(fields: [userId], references: [id])
+  org             Organization @relation(fields: [orgId], references: [id])
+  role            Role         @relation(fields: [roleId], references: [id])
+  createdAt       DateTime     @default(now())
+
+  @@unique([userId, orgId, roleId])
+  @@index([orgId])
+}
+
+/// Which farms (manager) or sheds (worker) a member may see. No rows for a
+/// user means unrestricted — that is how the owner works.
+model MemberScope {
+  id        String   @id @default(uuid())
+  orgId     String
+  userId    String
+  farmId    String?
+  shedId    String?
+  createdAt DateTime @default(now())
+
+  @@unique([orgId, userId, farmId, shedId])
+  @@index([orgId, userId])
+}
+
+model Role {
+  id          String       @id @default(uuid())
+  key         String
+  name        String
+  capability  Capability
+  orgId       String?
+  permissions Permission[]
+  memberships Membership[]
+
+  @@unique([orgId, key])
+}
+
+model Permission {
+  id       String           @id @default(uuid())
+  roleId   String
+  resource String
+  action   PermissionAction
+  role     Role             @relation(fields: [roleId], references: [id])
+
+  @@unique([roleId, resource, action])
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  orgId       String
+  actorUserId String
+  resource    String
+  resourceId  String
+  action      String
+  before      Json?
+  after       Json?
+  at          DateTime @default(now())
+
+  @@index([orgId, resource, resourceId])
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  orgId     String
+  userId    String?
+  type      String
+  title     String
+  body      String
+  payload   Json?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([orgId, userId])
+}
+
+/// An open alert. It resolves itself when the condition clears — the shed gets
+/// logged, the feed is bought, the payment lands.
+model Alert {
+  id          String    @id @default(uuid())
+  orgId       String
+  kind        AlertKind
+  /// What it is about, so the condition can be re-checked and cleared.
+  subjectType String
+  subjectId   String
+  farmId      String?
+  title       String
+  detail      String
+  value       Float?
+  /// YYYY-MM-DD: the same condition never fires twice in a day.
+  dayKey      String
+  readAt      DateTime?
+  resolvedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@unique([orgId, kind, subjectId, dayKey])
+  @@index([orgId, resolvedAt])
+}
+
+/// Every threshold is a setting. A farm that cannot change a number it
+/// disagrees with starts ignoring the whole feature.
+model AlertSetting {
+  id        String    @id @default(uuid())
+  orgId     String
+  kind      AlertKind
+  enabled   Boolean   @default(true)
+  threshold Float?
+
+  @@unique([orgId, kind])
+}
+
+/// Silenced per shed, per kind.
+model AlertMute {
+  id     String    @id @default(uuid())
+  orgId  String
+  kind   AlertKind
+  shedId String
+
+  @@unique([orgId, kind, shedId])
+}
+
+/// The breed's own performance sheet, typed once and shared by every batch of
+/// that breed. Nothing is seeded: a wrong seeded table is worse than none.
+model BreedStandard {
+  id     String               @id @default(uuid())
+  orgId  String
+  breed  String
+  points BreedStandardPoint[]
+
+  @@unique([orgId, breed])
+}
+
+model BreedStandardPoint {
+  id         String        @id @default(uuid())
+  standardId String
+  day        Int
+  weightG    Int
+  fcr        Float?
+  standard   BreedStandard @relation(fields: [standardId], references: [id], onDelete: Cascade)
+
+  @@unique([standardId, day])
+}
+
+/// What one member may see and do. Absent rows mean the role's defaults.
+model MemberVisibility {
+  id             String  @id @default(uuid())
+  orgId          String
+  userId         String
+  seeCosts       Boolean @default(true)
+  seeRevenue     Boolean @default(false)
+  seeProfit      Boolean @default(false)
+  canPlaceClose  Boolean @default(true)
+  canRecordSales Boolean @default(false)
+  canAddExpenses Boolean @default(true)
+
+  @@unique([orgId, userId])
+}
+
+/// Small org-level settings that would otherwise be schema churn.
+model OrgSetting {
+  orgId String
+  key   String
+  value Json
+
+  @@id([orgId, key])
+}
+
+// ─────────────────────────── farmer ───────────────────────────
+model Farm {
+  id        String       @id @default(uuid())
+  orgId     String
+  name      String
+  location  String?
+  // Phase 1: tenure decides whether this farm carries rent into its batches.
+  tenure     Tenure     @default(OWNED)
+  lessorName String?
+  rentAmount Int?       // minor units (paise)
+  rentBasis  RentBasis?
+  leaseStart DateTime?
+  leaseEnd   DateTime?
+  deposit    Int?       // minor units
+  org       Organization @relation(fields: [orgId], references: [id])
+  sheds     Shed[]
+  batches   Batch[]
+  createdBy String
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  deletedAt DateTime?
+
+  @@index([orgId])
+}
+
+model Shed {
+  id        String     @id @default(uuid())
+  orgId     String
+  farmId    String
+  code      String
+  capacity  Int
+  status    ShedStatus @default(EMPTY)
+  tenure    Tenure     @default(OWNED)
+  /// Optional, off by default: what an owned shed would fetch if rented out,
+  /// so owned and leased sheds compare on the same footing.
+  notionalRent Int?    // minor units per month
+  farm      Farm       @relation(fields: [farmId], references: [id])
+  batches   Batch[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@index([orgId, farmId])
+}
+
+model Batch {
+  id                String                @id @default(uuid())
+  orgId             String
+  farmId            String
+  shedId            String
+  chickSupplierId   String?
+  breed             String
+  // Phase 1 records the model so contract batches need no migration later.
+  growingModel      GrowingModel          @default(OWN)
+  hatchery          String?
+  chickRate         Int?                  // minor units per chick, as declared
+  chickDiscount     Int?                  // minor units per chick
+  placementDate     DateTime
+  targetHarvestDate DateTime?
+  initialBirds      Int
+  mortality         Int                   @default(0)
+  /// Birds killed as unfit. NOT where leftover birds go when a batch closes —
+  /// counting a write-off as a cull made every closed batch read 100%
+  /// mortality, which is the number the whole dashboard leans on.
+  culls             Int                   @default(0)
+  birdsSold         Int                   @default(0)
+  /// Birds unaccounted for at close: neither sold nor recorded as dead. They
+  /// bring birds-alive to zero without being blamed on welfare.
+  birdsWrittenOff   Int                   @default(0)
+  harvestVisibility String                @default("HIDDEN") // HIDDEN | NETWORK
+  status            BatchStatus           @default(PLANNED)
+  farm              Farm                  @relation(fields: [farmId], references: [id])
+  shed              Shed                  @relation(fields: [shedId], references: [id])
+  dailyLogs         DailyLog[]
+  weightRecords     WeightRecord[]
+  feedConsumption   FeedConsumption[]
+  medicineUsage     MedicineUsage[]
+  vaccinations      VaccinationSchedule[]
+  expenses          Expense[]
+  expenseAllocations ExpenseAllocation[]
+  revenues          Revenue[]
+  harvests          Harvest[]
+  sales             Sale[]
+  settlement        Settlement?
+  closure           BatchClosure?
+  purchases         Purchase[]
+  createdBy         String
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  deletedAt         DateTime?
+
+  @@index([orgId, status])
+}
+
+model DailyLog {
+  id              String    @id @default(uuid())
+  orgId           String
+  batchId         String
+  date            DateTime
+  openingBirds    Int
+  mortality       Int       @default(0)
+  culls           Int       @default(0)
+  closingBirds    Int
+  weightSampleQty Int?
+  avgWeight       Int?
+  minWeight       Int?
+  maxWeight       Int?
+  uniformity      Int?
+  feedType        FeedType?
+  feedConsumed    Int?
+  water           Int?
+  medicineNotes   String?
+  tempC           Float?
+  humidity        Float?
+  notes           String?
+  batch           Batch     @relation(fields: [batchId], references: [id])
+  createdBy       String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([batchId, date])
+  @@index([orgId])
+}
+
+model WeightRecord {
+  id         String   @id @default(uuid())
+  orgId      String
+  batchId    String
+  date       DateTime
+  sampleQty  Int
+  avgWeight  Int
+  minWeight  Int?
+  maxWeight  Int?
+  uniformity Int?
+  batch      Batch    @relation(fields: [batchId], references: [id])
+  createdAt  DateTime @default(now())
+
+  @@index([orgId, batchId])
+}
+
+model FeedItem {
+  id          String            @id @default(uuid())
+  orgId       String
+  type        FeedType
+  brand       String?
+  bagSizeKg   Int
+  inventory   FeedInventory[]
+  consumption FeedConsumption[]
+
+  @@index([orgId])
+}
+
+model FeedInventory {
+  id         String   @id @default(uuid())
+  orgId      String
+  farmId     String?
+  feedItemId String
+  kind       StockMovementKind @default(PURCHASE)
+  /// Required on an ADJUSTMENT: nothing is ever silently absorbed.
+  reason     String?
+  bags       Int      @default(0)
+  kg         Int      @default(0)
+  supplierId String?
+  /// Cost of one kg, in minor units. Issues are costed at the weighted average.
+  unitCost   Int?
+  currency   String   @default("INR")
+  date       DateTime @default(now())
+  feedItem   FeedItem @relation(fields: [feedItemId], references: [id])
+
+  @@index([orgId, feedItemId])
+}
+
+model FeedConsumption {
+  id         String   @id @default(uuid())
+  orgId      String
+  batchId    String
+  feedItemId String
+  date       DateTime
+  bags       Int      @default(0)
+  kg         Int      @default(0)
+  cost       Int?
+  currency   String   @default("INR")
+  batch      Batch    @relation(fields: [batchId], references: [id])
+  feedItem   FeedItem @relation(fields: [feedItemId], references: [id])
+
+  @@index([orgId, batchId])
+}
+
+model MedicineItem {
+  id              String              @id @default(uuid())
+  orgId           String
+  name            String
+  /// What one unit is — bottle, sachet, litre. Stock is counted in these.
+  unit            String
+  /// Days after the last dose before birds may be sold. The label's figure.
+  withdrawalDays  Int                 @default(0)
+  usage           MedicineUsage[]
+  inventory       MedicineInventory[]
+
+  @@index([orgId])
+}
+
+/// Medicine is bought a few units at a time and drawn down by batches, exactly
+/// as feed is. A purchase is cash out at the farm; the issue charges the batch.
+model MedicineInventory {
+  id             String            @id @default(uuid())
+  orgId          String
+  farmId         String?
+  medicineItemId String
+  kind           StockMovementKind @default(PURCHASE)
+  /// Required on an ADJUSTMENT: nothing is ever silently absorbed.
+  reason         String?
+  qty            Int               @default(0)
+  supplierId     String?
+  /// Cost of one unit, in minor units. Issues are costed at the weighted average.
+  unitCost       Int?
+  currency       String            @default("INR")
+  /// Medicine expires on a shelf; feed does not, so only this side carries it.
+  expiryDate     DateTime?
+  date           DateTime          @default(now())
+  medicineItem   MedicineItem      @relation(fields: [medicineItemId], references: [id])
+
+  @@index([orgId, medicineItemId])
+}
+
+model MedicineUsage {
+  id             String       @id @default(uuid())
+  orgId          String
+  batchId        String
+  medicineItemId String
+  date           DateTime
+  /// A five-day course is one record, not five.
+  endDate        DateTime?
+  withdrawalDays Int          @default(0)
+  reason         String?
+  qty            Int
+  cost           Int?
+  currency       String       @default("INR")
+  notes          String?
+  batch          Batch        @relation(fields: [batchId], references: [id])
+  medicineItem   MedicineItem @relation(fields: [medicineItemId], references: [id])
+
+  @@index([orgId, batchId])
+}
+
+model VaccinationSchedule {
+  id            String            @id @default(uuid())
+  orgId         String
+  batchId       String
+  vaccine       String
+  scheduledDate DateTime
+  completedDate DateTime?
+  status        VaccinationStatus @default(SCHEDULED)
+  batch         Batch             @relation(fields: [batchId], references: [id])
+
+  @@index([orgId, batchId])
+}
+
+/// Hatchery, feed supplier or buyer. Rates here only pre-fill an entry screen —
+/// every transaction stores the rate actually used on its own date.
+model Party {
+  id           String         @id @default(uuid())
+  orgId        String
+  kind         PartyKind
+  name         String
+  phone        String?
+  place        String?
+  /// Minor units: per chick (hatchery), per kg (feed supplier, buyer).
+  declaredRate Int?
+  /// Minor units off the declared rate. A buyer's may be a premium (negative).
+  discount     Int?
+  rateBasis    SaleRateBasis  @default(MARKET)
+  creditDays   Int            @default(15)
+  active       Boolean        @default(true)
+  sales        Sale[]
+  payments     BuyerPayment[]
+  /// Bills this party raised on the farm — the supplier side of the ledger.
+  expenses     Expense[]
+  paidOut      SupplierPayment[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@index([orgId, kind])
+}
+
+model Expense {
+  id        String          @id @default(uuid())
+  orgId     String
+  /// Set when the cost belongs to one batch. Null for a farm cost covering a
+  /// month and several batches — those are split by ExpenseAllocation.
+  batchId   String?
+  farmId    String?
+  category  ExpenseCategory
+  amount    Int
+  currency  String          @default("INR")
+  date      DateTime
+  /// First of the month for a monthly farm cost (wages, power, rent).
+  periodMonth DateTime?
+  /// Whether the bill was settled as it was entered. A false here is a bill on
+  /// credit: it stays outstanding and is cleared by SupplierPayment, never by
+  /// flipping this flag — the flag records how the bill arrived, not its state.
+  paid      Boolean         @default(true)
+  /// Who the money is owed to. Absent on a cost with no counterparty, such as
+  /// accrued rent or a cash sundry.
+  partyId   String?
+  billKey   String?
+  /// Rent accrues from a lease rather than being typed by anyone.
+  autoAccrued Boolean       @default(false)
+  notes     String?
+  batch     Batch?          @relation(fields: [batchId], references: [id])
+  party     Party?          @relation(fields: [partyId], references: [id])
+  allocations ExpenseAllocation[]
+  settlements SupplierPaymentAllocation[]
+  createdBy String
+  createdAt DateTime        @default(now())
+
+  @@index([orgId, batchId])
+  @@index([orgId, partyId])
+}
+
+/// Money paid out to a supplier, the mirror of BuyerPayment. One transfer is
+/// one row here however many bills it clears; what it cleared is in its
+/// allocations, and anything left over sits on account against future bills.
+model SupplierPayment {
+  id          String   @id @default(uuid())
+  orgId       String
+  partyId     String
+  date        DateTime
+  amount      Int
+  mode        String   @default("CASH")
+  reference   String?
+  notes       String?
+  party       Party    @relation(fields: [partyId], references: [id])
+  allocations SupplierPaymentAllocation[]
+  createdBy   String?
+  createdAt   DateTime @default(now())
+
+  @@index([orgId, partyId])
+}
+
+/// How much of one payment settled one bill. A bill is closed when its
+/// allocations reach its amount, so a part payment stays visibly part paid.
+model SupplierPaymentAllocation {
+  id        String          @id @default(uuid())
+  orgId     String
+  paymentId String
+  expenseId String
+  amount    Int
+  payment   SupplierPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  expense   Expense         @relation(fields: [expenseId], references: [id])
+
+  @@unique([paymentId, expenseId])
+  @@index([orgId, expenseId])
+}
+
+/// A farm cost's share of one batch, by bird-days. A batch that ran 20 Sep to
+/// 28 Oct carries eleven days of September and twenty-eight of October.
+model ExpenseAllocation {
+  id        String   @id @default(uuid())
+  orgId     String
+  expenseId String
+  batchId   String
+  amount    Int
+  birdDays  Int      @default(0)
+  manual    Boolean  @default(false)
+  expense   Expense  @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  batch     Batch    @relation(fields: [batchId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@unique([expenseId, batchId])
+  @@index([orgId, batchId])
+}
+
+model Revenue {
+  id       String        @id @default(uuid())
+  orgId    String
+  batchId  String
+  source   RevenueSource
+  amount   Int
+  currency String        @default("INR")
+  date     DateTime
+  batch    Batch         @relation(fields: [batchId], references: [id])
+
+  @@index([orgId, batchId])
+}
+
+model Harvest {
+  id             String   @id @default(uuid())
+  orgId          String
+  batchId        String
+  date           DateTime
+  birdsHarvested Int
+  totalWeight    Int
+  batch          Batch    @relation(fields: [batchId], references: [id])
+
+  @@index([orgId, batchId])
+}
+
+/// One lot, not the batch: birds leave in two or three lifts, to different
+/// traders, at different rates.
+model Sale {
+  id           String         @id @default(uuid())
+  orgId        String
+  batchId      String
+  buyerId      String?
+  date         DateTime       @default(now())
+  qty          Int
+  /// Gross live weight in grams.
+  weight       Int
+  /// Minor units per kg, as declared on the day.
+  declaredRate Int?
+  /// Minor units per kg off (or, negative, above) the declared rate.
+  discount     Int?
+  /// The rate actually used = declared − discount. Stored, never recomputed.
+  rate         Int
+  amount       Int
+  currency     String         @default("INR")
+  vehicle      String?
+  slipKey      String?
+  notes        String?
+  batch        Batch          @relation(fields: [batchId], references: [id])
+  buyer        Party?         @relation(fields: [buyerId], references: [id])
+  settlements  BuyerPaymentAllocation[]
+  createdBy    String?
+  createdAt    DateTime       @default(now())
+
+  @@index([orgId, batchId])
+}
+
+/// Money in from a buyer. Separate from the sale, because a trader pays part on
+/// the day and the rest next week.
+/// Money taken in from a buyer. One receipt is one row here however many lots
+/// it clears; what it cleared is in its allocations, and anything left over
+/// sits on account against the buyer's next lift.
+model BuyerPayment {
+  id          String   @id @default(uuid())
+  orgId       String
+  partyId     String
+  date        DateTime
+  amount      Int
+  mode        String   @default("CASH")
+  reference   String?
+  notes       String?
+  party       Party    @relation(fields: [partyId], references: [id])
+  allocations BuyerPaymentAllocation[]
+  createdBy   String?
+  createdAt   DateTime @default(now())
+
+  @@index([orgId, partyId])
+}
+
+/// How much of one receipt settled one lot. The mirror of
+/// SupplierPaymentAllocation: a lot is closed when its allocations reach its
+/// amount, so a part payment stays visibly part paid.
+model BuyerPaymentAllocation {
+  id        String       @id @default(uuid())
+  orgId     String
+  paymentId String
+  saleId    String
+  amount    Int
+  payment   BuyerPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  sale      Sale         @relation(fields: [saleId], references: [id])
+
+  @@unique([paymentId, saleId])
+  @@index([orgId, saleId])
+}
+
+model Settlement {
+  id        String        @id @default(uuid())
+  orgId     String
+  batchId   String        @unique
+  payable   Int
+  paid      Int           @default(0)
+  balance   Int
+  status    PaymentStatus @default(PENDING)
+  date      DateTime?
+  reference String?
+  currency  String        @default("INR")
+  batch     Batch         @relation(fields: [batchId], references: [id])
+}
+
+model BatchClosure {
+  id             String   @id @default(uuid())
+  orgId          String
+  batchId        String   @unique
+  closedAt       DateTime @default(now())
+  summaryMetrics Json
+  closedBy       String
+  batch          Batch    @relation(fields: [batchId], references: [id])
+}
+
+// ─────────────────────────── supplier ───────────────────────────
+model Product {
+  id            String       @id @default(uuid())
+  orgId         String
+  kind          String // 'CHICK' | 'FEED'
+  breed         String?
+  age           Int?
+  pricePerChick Int?
+  feedType      FeedType?
+  brand         String?
+  bagSize       Int?
+  pricePerBag   Int?
+  qty           Int          @default(0)
+  active        Boolean      @default(true)
+  currency      String       @default("INR")
+  org           Organization @relation(fields: [orgId], references: [id])
+  inventory     Inventory[]
+  orderLines    OrderLine[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([orgId])
+}
+
+model Inventory {
+  id        String  @id @default(uuid())
+  orgId     String
+  productId String
+  onHand    Int     @default(0)
+  reserved  Int     @default(0)
+  product   Product @relation(fields: [productId], references: [id])
+
+  @@index([orgId, productId])
+}
+
+model SupplierOrder {
+  id         String              @id @default(uuid())
+  orgId      String // supplier org
+  buyerOrgId String // farmer org
+  status     SupplierOrderStatus @default(DRAFT)
+  subtotal   Int                 @default(0)
+  tax        Int                 @default(0)
+  discount   Int                 @default(0)
+  total      Int                 @default(0)
+  currency   String              @default("INR")
+  lines      OrderLine[]
+  dispatches Dispatch[]
+  invoice    Invoice?
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  @@index([orgId, status])
+  @@index([buyerOrgId])
+}
+
+model OrderLine {
+  id         String        @id @default(uuid())
+  orderId    String
+  productId  String
+  qty        Int
+  unitRate   Int
+  lineAmount Int
+  subtotal   Int
+  tax        Int           @default(0)
+  discount   Int           @default(0)
+  total      Int
+  order      SupplierOrder @relation(fields: [orderId], references: [id])
+  product    Product       @relation(fields: [productId], references: [id])
+
+  @@index([orderId])
+}
+
+model Dispatch {
+  id       String        @id @default(uuid())
+  orderId  String
+  number   String
+  vehicle  String?
+  driver   String?
+  dateTime DateTime
+  status   String
+  order    SupplierOrder @relation(fields: [orderId], references: [id])
+
+  @@index([orderId])
+}
+
+model Invoice {
+  id       String        @id @default(uuid())
+  orderId  String        @unique
+  amount   Int
+  paid     Int           @default(0)
+  balance  Int
+  status   PaymentStatus @default(PENDING)
+  order    SupplierOrder @relation(fields: [orderId], references: [id])
+  payments Payment[]
+}
+
+model Payment {
+  id        String   @id @default(uuid())
+  invoiceId String
+  amount    Int
+  method    String?
+  reference String?
+  date      DateTime @default(now())
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+}
+
+// ─────────────────────────── distributor ───────────────────────────
+model DistributorProfile {
+  id            String               @id @default(uuid())
+  orgId         String               @unique
+  operatingArea String?
+  org           Organization         @relation(fields: [orgId], references: [id])
+  relationships FarmerRelationship[]
+  purchases     Purchase[]
+}
+
+model FarmerRelationship {
+  id                   String             @id @default(uuid())
+  distributorProfileId String
+  farmerOrgId          String
+  status               String             @default("active")
+  distributorProfile   DistributorProfile @relation(fields: [distributorProfileId], references: [id])
+
+  @@unique([distributorProfileId, farmerOrgId])
+}
+
+model Purchase {
+  id                   String                 @id @default(uuid())
+  orgId                String // distributor org
+  distributorProfileId String
+  batchId              String
+  farmerOrgId          String
+  expectedQty          Int
+  expectedWeight       Int
+  rate                 Int
+  amount               Int
+  currency             String                 @default("INR")
+  distributorProfile   DistributorProfile     @relation(fields: [distributorProfileId], references: [id])
+  batch                Batch                  @relation(fields: [batchId], references: [id])
+  actuals              PurchaseActuals?
+  settlement           DistributorSettlement?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+
+  @@index([orgId])
+  @@index([batchId])
+}
+
+model PurchaseActuals {
+  id          String   @id @default(uuid())
+  purchaseId  String   @unique
+  actualBirds Int
+  rejects     Int      @default(0)
+  liveWeight  Int
+  rate        Int
+  gross       Int
+  adjustments Int      @default(0)
+  final       Int
+  purchase    Purchase @relation(fields: [purchaseId], references: [id])
+}
+
+model DistributorSettlement {
+  id         String        @id @default(uuid())
+  purchaseId String        @unique
+  payable    Int
+  paid       Int           @default(0)
+  balance    Int
+  date       DateTime?
+  reference  String?
+  status     PaymentStatus @default(PENDING)
+  currency   String        @default("INR")
+  purchase   Purchase      @relation(fields: [purchaseId], references: [id])
+}
