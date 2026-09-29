@@ -1046,10 +1046,37 @@ model Inventory {
   @@index([orgId, productId])
 }
 
+/// An order the farm has placed for inputs.
+///
+/// Who `orgId` points at depends on how the deal was struck, and that is the
+/// commercial truth rather than a convenience. Under a reseller quote the
+/// trading partner IS the seller and the order is against them. Under an agent
+/// quote the supplier sells and the partner only arranged it, so the order is
+/// against the supplier and the partner is recorded separately as the
+/// facilitator with the fee they are owed.
+///
+/// Reading a facilitator as a seller, or a seller as a facilitator, is the
+/// mistake the spec spends a paragraph warning about.
 model SupplierOrder {
   id         String              @id @default(uuid())
-  orgId      String // supplier org
+  orgId      String // the seller: the supplier, or the partner when reselling
   buyerOrgId String // farmer org
+  /// The quote this came from, when it came from one.
+  ///
+  /// Unique, which is what makes "one accepted quote, one order" a guarantee
+  /// the database keeps rather than something the application remembers. Two
+  /// acceptances racing cannot produce two orders.
+  sourceQuoteId String?          @unique
+  /// How the deal was struck, snapshotted. The quote can be read for this, but
+  /// an order should not have to fetch another row to know who it is against.
+  dealModel  InputDealModel?
+  /// The trading partner who arranged it. Only set under AGENT — under
+  /// RESELLER the partner is the seller and is already `orgId`.
+  facilitatorOrgId String?
+  /// Minor units owed to the facilitator. Separate from the order's total,
+  /// which is what the seller is owed: adding them would invoice one party for
+  /// the other's money.
+  facilitationFee Int             @default(0)
   status     SupplierOrderStatus @default(DRAFT)
   subtotal   Int                 @default(0)
   tax        Int                 @default(0)
@@ -1069,7 +1096,13 @@ model SupplierOrder {
 model OrderLine {
   id         String        @id @default(uuid())
   orderId    String
-  productId  String
+  /// The catalogue item, when the order was placed from a catalogue. A line
+  /// from an accepted quote has none: the partner quoted a quantity and a
+  /// price, not a product, and inventing a catalogue row to hold it would put
+  /// something in a supplier's catalogue that they never listed.
+  productId  String?
+  /// What was ordered, in words, when there is no product to name it.
+  description String?
   qty        Int
   unitRate   Int
   lineAmount Int
@@ -1078,7 +1111,7 @@ model OrderLine {
   discount   Int           @default(0)
   total      Int
   order      SupplierOrder @relation(fields: [orderId], references: [id])
-  product    Product       @relation(fields: [productId], references: [id])
+  product    Product?      @relation(fields: [productId], references: [id])
 
   @@index([orderId])
 }
