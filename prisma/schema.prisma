@@ -150,11 +150,21 @@ enum ExpenseCategory {
 
 /// Who money moves to or from. A card remembers what this person charges you
 /// or pays you; it is not binding on any past transaction.
+/// Who a farm deals with. These are the farm's own records — a hatchery it buys
+/// from is a row here whether or not that hatchery has a KukkuOne account — so
+/// this is a different axis from Capability, which is what an account may do.
+///
+/// BUYER stays, deliberately. The spec keeps "buyer" as a transaction field
+/// precisely because a lifting partner may not be the purchaser: the party who
+/// collects the birds and the party who owes for them are often different
+/// people, and collapsing them loses who to chase for the money.
 enum PartyKind {
   HATCHERY
   FEED_SUPPLIER
   MEDICINE_SUPPLIER
   BUYER
+  LIFTING_PARTNER
+  TRADING_PARTNER
 }
 
 /// A buyer either pays the day's market rate or a fixed agreed rate.
@@ -682,7 +692,9 @@ model Party {
   rateBasis    SaleRateBasis  @default(MARKET)
   creditDays   Int            @default(15)
   active       Boolean        @default(true)
-  sales        Sale[]
+  sales        Sale[]         @relation("SaleBuyer")
+  lifted       Sale[]         @relation("SaleLifter")
+  brokered     Sale[]         @relation("SaleFacilitator")
   payments     BuyerPayment[]
   /// Bills this party raised on the farm — the supplier side of the ledger.
   expenses     Expense[]
@@ -808,11 +820,25 @@ model Harvest {
 
 /// One lot, not the batch: birds leave in two or three lifts, to different
 /// traders, at different rates.
+/// One lot of birds leaving the farm.
+///
+/// Three parties, recorded separately because they are separately true. The
+/// buyer owes the money. The lifting party turned up and took the birds, and
+/// may be somebody the buyer sent. The facilitator introduced the two and is
+/// owed a fee by whoever agreed to pay it. A sale where all three are the same
+/// person is common and still records three references to that person rather
+/// than one reference and two assumptions.
 model Sale {
   id           String         @id @default(uuid())
   orgId        String
   batchId      String
+  /// Who owes for these birds.
   buyerId      String?
+  /// Who collected them. Often the buyer, not always — a buyer may send a
+  /// lifter, and short weight is argued with whoever did the weighing.
+  liftingPartyId String?
+  /// The trading partner who introduced the deal, if one did.
+  facilitatorId  String?
   date         DateTime       @default(now())
   qty          Int
   /// Gross live weight in grams.
@@ -829,7 +855,9 @@ model Sale {
   slipKey      String?
   notes        String?
   batch        Batch          @relation(fields: [batchId], references: [id])
-  buyer        Party?         @relation(fields: [buyerId], references: [id])
+  buyer        Party?         @relation("SaleBuyer", fields: [buyerId], references: [id])
+  liftingParty Party?         @relation("SaleLifter", fields: [liftingPartyId], references: [id])
+  facilitator  Party?         @relation("SaleFacilitator", fields: [facilitatorId], references: [id])
   settlements  BuyerPaymentAllocation[]
   createdBy    String?
   createdAt    DateTime       @default(now())
