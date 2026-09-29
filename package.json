@@ -47,5 +47,15 @@
       "types": "./dist/d1.d.ts",
       "default": "./dist/d1.js"
     }
+  },
+  "typesVersions": {
+    "*": {
+      "edge": [
+        "dist/edge.d.ts"
+      ],
+      "d1": [
+        "dist/d1.d.ts"
+      ]
+    }
   }
 }
