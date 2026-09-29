@@ -47,6 +47,18 @@ enum TradingCapability {
   lifting_coordination
 }
 
+enum HarvestOfferStatus {
+  OPEN
+  CLOSED
+  WITHDRAWN
+}
+
+enum HarvestResponseKind {
+  INTERESTED
+  DECLINED
+  COUNTER
+}
+
 enum PermissionAction {
   View
   Create
@@ -226,7 +238,12 @@ model Organization {
 
 model User {
   id          String             @id @default(uuid())
-  email       String             @unique
+  /// Optional since sign-in by mobile number: somebody who signs up with a
+  /// phone has no email to give, and inventing one would make it a lookup key
+  /// that matches nothing. Exactly one of email or phone is always present.
+  email       String?            @unique
+  /// E.164, including the country code. Unique because it is a sign-in key.
+  phone       String?            @unique
   displayName String?
   photoUrl    String?
   status      String             @default("active")
@@ -234,6 +251,35 @@ model User {
   memberships Membership[]
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
+}
+
+/// One OTP challenge: a code sent to a number, and what has been tried
+/// against it.
+///
+/// The row exists because 2Factor's VERIFY takes the session id its AUTOGEN
+/// returned, so unlike a provider that checks phone-plus-code the two calls
+/// are not independent — something has to hold the session id in between. A
+/// Worker has no memory between requests, so it is held here.
+///
+/// It carries the throttle counters too. Keeping the sends and the attempts on
+/// the same row as the session means one read answers "may this person ask for
+/// another code" and "have they burned their guesses on this one".
+model OtpChallenge {
+  id         String    @id @default(uuid())
+  /// E.164. Indexed with createdAt because every throttle question is "what
+  /// has this number done recently".
+  phone      String
+  /// 2Factor's session id, from the AUTOGEN response's `Details`.
+  sessionId  String
+  /// Verify attempts spent against this challenge. Separate from the send
+  /// count on purpose: a mistyped code must not eat somebody's resends.
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  /// Set when the code was accepted. A consumed challenge is never reusable.
+  consumedAt DateTime?
+
+  @@index([phone, createdAt])
 }
 
 model ExternalIdentity {
@@ -487,10 +533,15 @@ model Batch {
   /// Birds unaccounted for at close: neither sold nor recorded as dead. They
   /// bring birds-alive to zero without being blamed on welfare.
   birdsWrittenOff   Int                   @default(0)
+  /// Legacy broadcast flag: NETWORK puts the batch in front of every account
+  /// holding the trade capability. HarvestOffer is the addressed replacement —
+  /// a farmer names who may see a lot — and this stays only so existing rows
+  /// keep working while discovery is migrated.
   harvestVisibility String                @default("HIDDEN") // HIDDEN | NETWORK
   status            BatchStatus           @default(PLANNED)
   farm              Farm                  @relation(fields: [farmId], references: [id])
   shed              Shed                  @relation(fields: [shedId], references: [id])
+  harvestOffers     HarvestOffer[]
   dailyLogs         DailyLog[]
   weightRecords     WeightRecord[]
   feedConsumption   FeedConsumption[]
@@ -1101,4 +1152,89 @@ model DistributorSettlement {
   status     PaymentStatus @default(PENDING)
   currency   String        @default("INR")
   purchase   Purchase      @relation(fields: [purchaseId], references: [id])
+}
+
+/// A farmer offering a harvest-ready batch to named lifting partners.
+///
+/// This is a grant, not a publication. A role does not entitle anybody to see
+/// another participant's farms or batches; what a recipient may see is what a
+/// farmer chose to tell them about one lot, and nothing else. The batch's
+/// mortality, medicine, costs and margin are not reachable from here, by
+/// design and not by omission.
+///
+/// The numbers are a snapshot taken when the offer was made rather than a join
+/// onto the batch. Two reasons. A live join would be exactly the window this is
+/// meant not to be — a recipient would watch the flock change. And an offer is
+/// a statement somebody made on a day: birds die between the offer and the
+/// lift, and what was offered has to stay readable afterwards, or an argument
+/// about short weight has nothing to refer to.
+model HarvestOffer {
+  id            String              @id @default(uuid())
+  /// The farmer's organisation. Recipients are in HarvestOfferRecipient.
+  orgId         String
+  batchId       String
+  /// As offered, on offeredAt. Deliberately not live.
+  birds         Int
+  /// Grams. Null when the batch has no weight record yet.
+  avgWeightGrams Int?
+  readyDate     DateTime
+  /// Minor units per kg the farmer is asking, if they said one.
+  askRate       Int?
+  /// Snapshot too: a recipient is told which farm and where, and gains no
+  /// route to the farm record itself.
+  farmName      String
+  place         String?
+  breed         String?
+  notes         String?
+  status        HarvestOfferStatus  @default(OPEN)
+  offeredAt     DateTime            @default(now())
+  closedAt      DateTime?
+  createdBy     String?
+  batch         Batch               @relation(fields: [batchId], references: [id])
+  recipients    HarvestOfferRecipient[]
+  responses     HarvestOfferResponse[]
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([orgId, status])
+  @@index([batchId])
+}
+
+/// Who a farmer showed an offer to. The grant itself: an organisation sees an
+/// offer if and only if it has a row here.
+model HarvestOfferRecipient {
+  id       String       @id @default(uuid())
+  offerId  String
+  /// The recipient organisation — a lifting partner, or a trading partner
+  /// asked to market the lot.
+  orgId    String
+  /// The farmer's own contact record for them, when they have one. Kept so the
+  /// farmer's books and the platform account can be reconciled later.
+  partyId  String?
+  seenAt   DateTime?
+  offer    HarvestOffer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  createdAt DateTime    @default(now())
+
+  @@unique([offerId, orgId])
+  @@index([orgId])
+}
+
+/// A recipient's answer. Interest, a decline, or a counter with its own terms.
+model HarvestOfferResponse {
+  id          String              @id @default(uuid())
+  offerId     String
+  /// The responding organisation.
+  orgId       String
+  kind        HarvestResponseKind
+  /// A counter states its own terms; interest may restate them or not.
+  birds       Int?
+  rate        Int?
+  pickupDate  DateTime?
+  notes       String?
+  respondedBy String?
+  offer       HarvestOffer        @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  createdAt   DateTime            @default(now())
+
+  @@index([offerId])
+  @@index([orgId])
 }

@@ -1,21 +1,9 @@
-// KukkuOne data model — the SQLite/D1 rendering.
-//
-// GENERATED from schema.prisma by scripts/to-d1.py. Edit that file, not this
-// one, and re-run the script.
-//
-// SQLite cannot express three things the Postgres schema uses, so:
-//   - every enum is a String. The values are unchanged and still checked in
-//     TypeScript by @kukkuone/types; the database no longer checks them.
-//   - Organization.capabilities is a JSON array in a String.
-//   - every Json column is a String holding JSON.
+// KukkuOne data model — one PostgreSQL DB via Prisma.
 // See docs/06-Data-Model.md. Money = integer minor units + currency.
 // Weights/feed = grams. Partitions (core/farmer/supplier/distributor) are logical.
 
 generator client {
   provider = "prisma-client-js"
-  // Its own output. The Node services keep the Postgres client generated from
-  // schema.prisma; this one knows the SQLite column types and would be wrong
-  // for them.
   output   = "../node_modules/.prisma/client-d1"
   // Driver adapters let the client run on a runtime that has no TCP sockets of
   // its own — a Cloudflare Worker — by handing the connection to a driver the
@@ -26,15 +14,34 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  // D1 is reached through the driver adapter, not this URL. Prisma still
-  // requires one to generate and to diff migrations against, so it points at a
-  // throwaway local file that nothing ever serves from.
   url      = env("D1_SHADOW_URL")
 }
 
 // ─────────────────────────── enums ───────────────────────────
+/// The platform's six business roles. Mirrors Capability in @kukkuone/types —
+/// check:enums fails the build if the two drift.
+///
+/// SUPPLIER split into HATCHERY and FEED_SUPPLIER (a supplier product was
+/// already 'CHICK' | 'FEED', so the distinction existed a level down), and
+/// DISTRIBUTOR became LIFTING_PARTNER — what it does is discover harvest-ready
+/// batches, record actual weight lifted and settle, which is lifting rather
+/// than trading.
+/// What a Trading Partner actually does, enabled one by one. Mirrors
+/// TradingCapability in @kukkuone/types.
+///
+/// Lower-case because that is how the spec writes these keys, and re-casing
+/// them would leave the stored value no longer matching the document anyone
+/// checks it against. Prisma accepts the identifiers as-is.
 /// Who money moves to or from. A card remembers what this person charges you
 /// or pays you; it is not binding on any past transaction.
+/// Who a farm deals with. These are the farm's own records — a hatchery it buys
+/// from is a row here whether or not that hatchery has a KukkuOne account — so
+/// this is a different axis from Capability, which is what an account may do.
+///
+/// BUYER stays, deliberately. The spec keeps "buyer" as a transaction field
+/// precisely because a lifting partner may not be the purchaser: the party who
+/// collects the birds and the party who owes for them are often different
+/// people, and collapsing them loses who to chase for the money.
 /// A buyer either pays the day's market rate or a fixed agreed rate.
 /// Why feed stock moved: bought in, returned, or reconciled after a count.
 /// The ten conditions the app watches. Each names a shed, a number and an
@@ -45,7 +52,12 @@ model Organization {
   id           String              @id @default(uuid())
   name         String
   capabilities String   // JSON array of Capability
-  tradingCapabilities String @default("[]") // JSON array of TradingCapability
+  /// Only meaningful alongside the TRADING_PARTNER capability, and empty is a
+  /// real answer: holding the role says nothing about which of these the
+  /// partner does, which is the whole reason the spec lists them separately.
+  /// Nothing may infer that a partner owns inventory or buys birds merely
+  /// because they arranged a deal.
+  tradingCapabilities TradingCapability[]
   baseCurrency String              @default("INR")
   status       String              @default("active")
   memberships  Membership[]
@@ -59,7 +71,12 @@ model Organization {
 
 model User {
   id          String             @id @default(uuid())
-  email       String             @unique
+  /// Optional since sign-in by mobile number: somebody who signs up with a
+  /// phone has no email to give, and inventing one would make it a lookup key
+  /// that matches nothing. Exactly one of email or phone is always present.
+  email       String?            @unique
+  /// E.164, including the country code. Unique because it is a sign-in key.
+  phone       String?            @unique
   displayName String?
   photoUrl    String?
   status      String             @default("active")
@@ -67,6 +84,35 @@ model User {
   memberships Membership[]
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
+}
+
+/// One OTP challenge: a code sent to a number, and what has been tried
+/// against it.
+///
+/// The row exists because 2Factor's VERIFY takes the session id its AUTOGEN
+/// returned, so unlike a provider that checks phone-plus-code the two calls
+/// are not independent — something has to hold the session id in between. A
+/// Worker has no memory between requests, so it is held here.
+///
+/// It carries the throttle counters too. Keeping the sends and the attempts on
+/// the same row as the session means one read answers "may this person ask for
+/// another code" and "have they burned their guesses on this one".
+model OtpChallenge {
+  id         String    @id @default(uuid())
+  /// E.164. Indexed with createdAt because every throttle question is "what
+  /// has this number done recently".
+  phone      String
+  /// 2Factor's session id, from the AUTOGEN response's `Details`.
+  sessionId  String
+  /// Verify attempts spent against this challenge. Separate from the send
+  /// count on purpose: a mistyped code must not eat somebody's resends.
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  /// Set when the code was accepted. A consumed challenge is never reusable.
+  consumedAt DateTime?
+
+  @@index([phone, createdAt])
 }
 
 model ExternalIdentity {
@@ -320,10 +366,15 @@ model Batch {
   /// Birds unaccounted for at close: neither sold nor recorded as dead. They
   /// bring birds-alive to zero without being blamed on welfare.
   birdsWrittenOff   Int                   @default(0)
+  /// Legacy broadcast flag: NETWORK puts the batch in front of every account
+  /// holding the trade capability. HarvestOffer is the addressed replacement —
+  /// a farmer names who may see a lot — and this stays only so existing rows
+  /// keep working while discovery is migrated.
   harvestVisibility String                @default("HIDDEN") // HIDDEN | NETWORK
   status String           @default("PLANNED")
   farm              Farm                  @relation(fields: [farmId], references: [id])
   shed              Shed                  @relation(fields: [shedId], references: [id])
+  harvestOffers     HarvestOffer[]
   dailyLogs         DailyLog[]
   weightRecords     WeightRecord[]
   feedConsumption   FeedConsumption[]
@@ -525,7 +576,9 @@ model Party {
   rateBasis String  @default("MARKET")
   creditDays   Int            @default(15)
   active       Boolean        @default(true)
-  sales        Sale[]
+  sales        Sale[]         @relation("SaleBuyer")
+  lifted       Sale[]         @relation("SaleLifter")
+  brokered     Sale[]         @relation("SaleFacilitator")
   payments     BuyerPayment[]
   /// Bills this party raised on the farm — the supplier side of the ledger.
   expenses     Expense[]
@@ -651,11 +704,25 @@ model Harvest {
 
 /// One lot, not the batch: birds leave in two or three lifts, to different
 /// traders, at different rates.
+/// One lot of birds leaving the farm.
+///
+/// Three parties, recorded separately because they are separately true. The
+/// buyer owes the money. The lifting party turned up and took the birds, and
+/// may be somebody the buyer sent. The facilitator introduced the two and is
+/// owed a fee by whoever agreed to pay it. A sale where all three are the same
+/// person is common and still records three references to that person rather
+/// than one reference and two assumptions.
 model Sale {
   id           String         @id @default(uuid())
   orgId        String
   batchId      String
+  /// Who owes for these birds.
   buyerId      String?
+  /// Who collected them. Often the buyer, not always — a buyer may send a
+  /// lifter, and short weight is argued with whoever did the weighing.
+  liftingPartyId String?
+  /// The trading partner who introduced the deal, if one did.
+  facilitatorId  String?
   date         DateTime       @default(now())
   qty          Int
   /// Gross live weight in grams.
@@ -672,7 +739,9 @@ model Sale {
   slipKey      String?
   notes        String?
   batch        Batch          @relation(fields: [batchId], references: [id])
-  buyer        Party?         @relation(fields: [buyerId], references: [id])
+  buyer        Party?         @relation("SaleBuyer", fields: [buyerId], references: [id])
+  liftingParty Party?         @relation("SaleLifter", fields: [liftingPartyId], references: [id])
+  facilitator  Party?         @relation("SaleFacilitator", fields: [facilitatorId], references: [id])
   settlements  BuyerPaymentAllocation[]
   createdBy    String?
   createdAt    DateTime       @default(now())
@@ -916,4 +985,89 @@ model DistributorSettlement {
   status String @default("PENDING")
   currency   String        @default("INR")
   purchase   Purchase      @relation(fields: [purchaseId], references: [id])
+}
+
+/// A farmer offering a harvest-ready batch to named lifting partners.
+///
+/// This is a grant, not a publication. A role does not entitle anybody to see
+/// another participant's farms or batches; what a recipient may see is what a
+/// farmer chose to tell them about one lot, and nothing else. The batch's
+/// mortality, medicine, costs and margin are not reachable from here, by
+/// design and not by omission.
+///
+/// The numbers are a snapshot taken when the offer was made rather than a join
+/// onto the batch. Two reasons. A live join would be exactly the window this is
+/// meant not to be — a recipient would watch the flock change. And an offer is
+/// a statement somebody made on a day: birds die between the offer and the
+/// lift, and what was offered has to stay readable afterwards, or an argument
+/// about short weight has nothing to refer to.
+model HarvestOffer {
+  id            String              @id @default(uuid())
+  /// The farmer's organisation. Recipients are in HarvestOfferRecipient.
+  orgId         String
+  batchId       String
+  /// As offered, on offeredAt. Deliberately not live.
+  birds         Int
+  /// Grams. Null when the batch has no weight record yet.
+  avgWeightGrams Int?
+  readyDate     DateTime
+  /// Minor units per kg the farmer is asking, if they said one.
+  askRate       Int?
+  /// Snapshot too: a recipient is told which farm and where, and gains no
+  /// route to the farm record itself.
+  farmName      String
+  place         String?
+  breed         String?
+  notes         String?
+  status String  @default("OPEN")
+  offeredAt     DateTime            @default(now())
+  closedAt      DateTime?
+  createdBy     String?
+  batch         Batch               @relation(fields: [batchId], references: [id])
+  recipients    HarvestOfferRecipient[]
+  responses     HarvestOfferResponse[]
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([orgId, status])
+  @@index([batchId])
+}
+
+/// Who a farmer showed an offer to. The grant itself: an organisation sees an
+/// offer if and only if it has a row here.
+model HarvestOfferRecipient {
+  id       String       @id @default(uuid())
+  offerId  String
+  /// The recipient organisation — a lifting partner, or a trading partner
+  /// asked to market the lot.
+  orgId    String
+  /// The farmer's own contact record for them, when they have one. Kept so the
+  /// farmer's books and the platform account can be reconciled later.
+  partyId  String?
+  seenAt   DateTime?
+  offer    HarvestOffer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  createdAt DateTime    @default(now())
+
+  @@unique([offerId, orgId])
+  @@index([orgId])
+}
+
+/// A recipient's answer. Interest, a decline, or a counter with its own terms.
+model HarvestOfferResponse {
+  id          String              @id @default(uuid())
+  offerId     String
+  /// The responding organisation.
+  orgId       String
+  kind String
+  /// A counter states its own terms; interest may restate them or not.
+  birds       Int?
+  rate        Int?
+  pickupDate  DateTime?
+  notes       String?
+  respondedBy String?
+  offer       HarvestOffer        @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  createdAt   DateTime            @default(now())
+
+  @@index([offerId])
+  @@index([orgId])
 }
