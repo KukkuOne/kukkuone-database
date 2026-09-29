@@ -34,6 +34,19 @@ enum Capability {
   CHICKEN_RETAILER
 }
 
+/// What a Trading Partner actually does, enabled one by one. Mirrors
+/// TradingCapability in @kukkuone/types.
+///
+/// Lower-case because that is how the spec writes these keys, and re-casing
+/// them would leave the stored value no longer matching the document anyone
+/// checks it against. Prisma accepts the identifiers as-is.
+enum TradingCapability {
+  chick_trading
+  feed_trading
+  bird_marketing
+  lifting_coordination
+}
+
 enum PermissionAction {
   View
   Create
@@ -184,6 +197,12 @@ model Organization {
   id           String              @id @default(uuid())
   name         String
   capabilities Capability[]
+  /// Only meaningful alongside the TRADING_PARTNER capability, and empty is a
+  /// real answer: holding the role says nothing about which of these the
+  /// partner does, which is the whole reason the spec lists them separately.
+  /// Nothing may infer that a partner owns inventory or buys birds merely
+  /// because they arranged a deal.
+  tradingCapabilities TradingCapability[]
   baseCurrency String              @default("INR")
   status       String              @default("active")
   memberships  Membership[]
