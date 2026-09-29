@@ -73,46 +73,109 @@ export const ROLE_TEMPLATES: Record<Capability, RoleTemplate[]> = {
       permissions: perms(['finance', 'settlement', 'batch'], ['View', 'Report', 'Settle']),
     },
   ],
-  SUPPLIER: [
-    { key: 'SUPPLIER_OWNER', name: 'Owner', capability: 'SUPPLIER', permissions: ownerPerms() },
+  // Hatchery and Feed Supplier run the same shape of business — publish a
+  // catalog, take orders, confirm terms, dispatch, invoice, reconcile — so
+  // they carry the same four roles over the same resources. They are separate
+  // capabilities rather than one "supplier" because the spec keeps them
+  // distinct direct sources, and because an org may be one without being the
+  // other.
+  HATCHERY: [
+    { key: 'HATCHERY_OWNER', name: 'Owner', capability: 'HATCHERY', permissions: ownerPerms() },
     {
-      key: 'SUPPLIER_MANAGER',
+      key: 'HATCHERY_MANAGER',
       name: 'Manager',
-      capability: 'SUPPLIER',
+      capability: 'HATCHERY',
       permissions: perms(['product', 'order', 'dispatch', 'invoice'], ['View', 'Create', 'Edit', 'Approve', 'Report']),
     },
     {
-      key: 'SUPPLIER_OPERATIONS',
+      key: 'HATCHERY_OPERATIONS',
       name: 'Operations',
-      capability: 'SUPPLIER',
+      capability: 'HATCHERY',
       permissions: perms(['order', 'dispatch'], ['View', 'Edit', 'Dispatch']),
     },
     {
-      key: 'SUPPLIER_FINANCE',
+      key: 'HATCHERY_FINANCE',
       name: 'Finance',
-      capability: 'SUPPLIER',
+      capability: 'HATCHERY',
       permissions: perms(['invoice', 'payment'], ['View', 'Report', 'Settle']),
     },
   ],
-  DISTRIBUTOR: [
-    { key: 'DISTRIBUTOR_OWNER', name: 'Owner', capability: 'DISTRIBUTOR', permissions: ownerPerms() },
+  FEED_SUPPLIER: [
+    { key: 'FEED_SUPPLIER_OWNER', name: 'Owner', capability: 'FEED_SUPPLIER', permissions: ownerPerms() },
     {
-      key: 'DISTRIBUTOR_PROCUREMENT_MANAGER',
-      name: 'Procurement Manager',
-      capability: 'DISTRIBUTOR',
-      permissions: perms(['discovery', 'purchase'], ['View', 'Create', 'Edit', 'Approve', 'Report']),
+      key: 'FEED_SUPPLIER_MANAGER',
+      name: 'Manager',
+      capability: 'FEED_SUPPLIER',
+      permissions: perms(['product', 'order', 'dispatch', 'invoice'], ['View', 'Create', 'Edit', 'Approve', 'Report']),
     },
     {
-      key: 'DISTRIBUTOR_OPERATIONS_MANAGER',
-      name: 'Operations Manager',
-      capability: 'DISTRIBUTOR',
-      permissions: perms(['purchase', 'collection'], ['View', 'Edit', 'Dispatch']),
+      key: 'FEED_SUPPLIER_OPERATIONS',
+      name: 'Operations',
+      capability: 'FEED_SUPPLIER',
+      permissions: perms(['order', 'dispatch'], ['View', 'Edit', 'Dispatch']),
     },
     {
-      key: 'DISTRIBUTOR_FINANCE_MANAGER',
-      name: 'Finance Manager',
-      capability: 'DISTRIBUTOR',
-      permissions: perms(['settlement'], ['View', 'Report', 'Settle']),
+      key: 'FEED_SUPPLIER_FINANCE',
+      name: 'Finance',
+      capability: 'FEED_SUPPLIER',
+      permissions: perms(['invoice', 'payment'], ['View', 'Report', 'Settle']),
+    },
+  ],
+  // The intermediary. `quote` and `offer` are its own resources: it works by
+  // quoting inputs and by passing farmer-authorised harvest offers to lifters,
+  // which is not the same as owning stock or buying birds. It gets no
+  // `dispatch` — a partner who never takes delivery cannot dispatch — and no
+  // `farm` or `batch`, because access to those is granted per transaction by
+  // the farmer rather than carried by the role.
+  TRADING_PARTNER: [
+    { key: 'TRADING_PARTNER_OWNER', name: 'Owner', capability: 'TRADING_PARTNER', permissions: ownerPerms() },
+    {
+      key: 'TRADING_PARTNER_MANAGER',
+      name: 'Manager',
+      capability: 'TRADING_PARTNER',
+      permissions: perms(['quote', 'order', 'offer'], ['View', 'Create', 'Edit', 'Approve', 'Report']),
+    },
+    {
+      key: 'TRADING_PARTNER_FINANCE',
+      name: 'Finance',
+      capability: 'TRADING_PARTNER',
+      permissions: perms(['invoice', 'commission', 'payment'], ['View', 'Report', 'Settle']),
+    },
+  ],
+  // What DISTRIBUTOR was. `collection` is the pickup itself and `purchase` the
+  // commercial side, and they are deliberately separate: a lifter may collect
+  // without being the buyer, so the two must be recordable against different
+  // parties.
+  LIFTING_PARTNER: [
+    { key: 'LIFTING_PARTNER_OWNER', name: 'Owner', capability: 'LIFTING_PARTNER', permissions: ownerPerms() },
+    {
+      key: 'LIFTING_PARTNER_OPERATIONS',
+      name: 'Operations',
+      capability: 'LIFTING_PARTNER',
+      permissions: perms(['offer', 'purchase', 'collection'], ['View', 'Create', 'Edit', 'Dispatch']),
+    },
+    {
+      key: 'LIFTING_PARTNER_FINANCE',
+      name: 'Finance',
+      capability: 'LIFTING_PARTNER',
+      permissions: perms(['settlement', 'invoice'], ['View', 'Report', 'Settle']),
+    },
+  ],
+  // Downstream. Buys, receives, reconciles — and reads nothing of a farmer's
+  // flock health, medicine or profitability.
+  CHICKEN_RETAILER: [
+    { key: 'CHICKEN_RETAILER_OWNER', name: 'Owner', capability: 'CHICKEN_RETAILER', permissions: ownerPerms() },
+    {
+      key: 'CHICKEN_RETAILER_MANAGER',
+      name: 'Manager',
+      capability: 'CHICKEN_RETAILER',
+      permissions: perms(['demand', 'purchase', 'receipt'], ['View', 'Create', 'Edit', 'Approve', 'Report']),
+    },
+    {
+      key: 'CHICKEN_RETAILER_FINANCE',
+      name: 'Finance',
+      capability: 'CHICKEN_RETAILER',
+      permissions: perms(['invoice', 'payment'], ['View', 'Report', 'Settle']),
     },
   ],
 };

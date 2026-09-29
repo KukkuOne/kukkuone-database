@@ -5,6 +5,11 @@ node_modules/
 # Build output
 dist/
 dist-worker/
+# Compiled output has escaped into src/ before — tsc without an outDir drops
+# .js next to the .ts, and a relative import of ../src/rbac then resolves to
+# the stale copy rather than the source. dist/ is the only build output.
+src/**/*.js
+src/**/*.js.map
 build/
 .next/
 *.tsbuildinfo

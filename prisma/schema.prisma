@@ -17,10 +17,21 @@ datasource db {
 }
 
 // ─────────────────────────── enums ───────────────────────────
+/// The platform's six business roles. Mirrors Capability in @kukkuone/types —
+/// check:enums fails the build if the two drift.
+///
+/// SUPPLIER split into HATCHERY and FEED_SUPPLIER (a supplier product was
+/// already 'CHICK' | 'FEED', so the distinction existed a level down), and
+/// DISTRIBUTOR became LIFTING_PARTNER — what it does is discover harvest-ready
+/// batches, record actual weight lifted and settle, which is lifting rather
+/// than trading.
 enum Capability {
   FARMER
-  DISTRIBUTOR
-  SUPPLIER
+  HATCHERY
+  FEED_SUPPLIER
+  TRADING_PARTNER
+  LIFTING_PARTNER
+  CHICKEN_RETAILER
 }
 
 enum PermissionAction {
