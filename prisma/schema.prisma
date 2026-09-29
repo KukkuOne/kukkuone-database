@@ -1211,6 +1211,15 @@ model HarvestOfferRecipient {
   /// The farmer's own contact record for them, when they have one. Kept so the
   /// farmer's books and the platform account can be reconciled later.
   partyId  String?
+  /// The trading partner who passed this on, when the farmer did not address
+  /// them directly. Null means the farmer chose them.
+  ///
+  /// Recorded rather than inferred because the chain is the point: a farmer
+  /// who offered a lot to one broker should be able to see it reached four
+  /// lifters and which broker sent it there. It is also what makes a forward
+  /// auditable, which the spec asks for on anything touching price, quantity,
+  /// pickup or settlement.
+  viaOrgId String?
   seenAt   DateTime?
   offer    HarvestOffer @relation(fields: [offerId], references: [id], onDelete: Cascade)
   createdAt DateTime    @default(now())

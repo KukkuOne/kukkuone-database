@@ -57,7 +57,7 @@ model Organization {
   /// partner does, which is the whole reason the spec lists them separately.
   /// Nothing may infer that a partner owns inventory or buys birds merely
   /// because they arranged a deal.
-  tradingCapabilities TradingCapability[]
+  tradingCapabilities String   // JSON array of TradingCapability
   baseCurrency String              @default("INR")
   status       String              @default("active")
   memberships  Membership[]
