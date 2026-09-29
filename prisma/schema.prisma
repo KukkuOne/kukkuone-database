@@ -47,6 +47,39 @@ enum TradingCapability {
   lifting_coordination
 }
 
+/// What is being sold. Mirrors ProductKind in @kukkuone/types, which until now
+/// had no counterpart here — SupplierProduct.kind is a bare string, so the two
+/// could drift without check:enums noticing. New columns use the enum; that
+/// column is left alone rather than migrated in passing.
+enum ProductKind {
+  CHICK
+  FEED
+}
+
+/// How a trading partner is standing in an input deal.
+///
+/// The spec insists this is recorded rather than inferred, and it is the whole
+/// commercial difference between the two. As an AGENT the partner arranges a
+/// purchase the farmer makes from the supplier: the supplier invoices the
+/// farm, and the partner is owed a fee by whoever agreed to pay it. As a
+/// RESELLER the partner bought the stock and is selling it on: the partner
+/// invoices the farm, and the margin is the partner's own business.
+///
+/// Nothing may infer that a partner owns inventory because they arranged a
+/// deal — which is exactly the mistake this column exists to prevent.
+enum InputDealModel {
+  AGENT
+  RESELLER
+}
+
+enum InputQuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+  WITHDRAWN
+}
+
 enum HarvestOfferStatus {
   OPEN
   CLOSED
@@ -1246,4 +1279,50 @@ model HarvestOfferResponse {
 
   @@index([offerId])
   @@index([orgId])
+}
+
+/// A trading partner quoting a farmer for chicks or feed.
+///
+/// The quote states the model up front, because a farmer accepting it is
+/// agreeing to a different arrangement in each case: under AGENT they will owe
+/// the supplier and the partner separately, under RESELLER they will owe the
+/// partner alone. Settlement responsibility has to be clear before acceptance,
+/// not discovered at the invoice.
+model InputQuote {
+  id            String           @id @default(uuid())
+  /// The trading partner making the quote.
+  orgId         String
+  /// The farm being quoted.
+  farmerOrgId   String
+  kind          ProductKind
+  model         InputDealModel
+  /// What is being quoted, in the unit the kind is sold by: chicks by the
+  /// bird, feed by the bag.
+  qty           Int
+  unit          String
+  /// Minor units. Under AGENT this is the supplier's price, which the farm
+  /// will pay the supplier. Under RESELLER it is the partner's own price and
+  /// the only figure the farm pays.
+  unitPrice     Int
+  /// The partner's fee, per unit, in minor units. Only meaningful under AGENT:
+  /// a reseller's margin is inside unitPrice and is not the farm's business,
+  /// and stating it as a separate charge would misrepresent the deal.
+  feePerUnit    Int?
+  /// Who the stock actually comes from. Required in spirit under AGENT — the
+  /// farm is buying from them and has to know who — and optional under
+  /// RESELLER, where the partner is the seller.
+  supplierOrgId String?
+  currency      String           @default("INR")
+  deliveryBy    DateTime?
+  validUntil    DateTime?
+  terms         String?
+  notes         String?
+  status        InputQuoteStatus @default(SENT)
+  respondedAt   DateTime?
+  createdBy     String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([orgId, status])
+  @@index([farmerOrgId, status])
 }
