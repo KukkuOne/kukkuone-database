@@ -31,3 +31,8 @@ google-services.json
 .turbo/
 coverage/
 .DS_Store
+
+# Compiled output next to the sources. develop had these committed; they go
+# stale beside the .ts they came from and are rebuilt by `pnpm build`.
+src/*.js
+src/*.js.map
