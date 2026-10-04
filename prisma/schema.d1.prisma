@@ -586,10 +586,14 @@ model Party {
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 
+  revenues       Revenue[]
+  accountEntries AccountEntry[]
+
   @@index([orgId, kind])
 }
 
 model Expense {
+  accountId   String?
   id        String          @id @default(uuid())
   orgId     String
   /// Set when the cost belongs to one batch. Null for a farm cost covering a
@@ -628,6 +632,7 @@ model Expense {
 /// one row here however many bills it clears; what it cleared is in its
 /// allocations, and anything left over sits on account against future bills.
 model SupplierPayment {
+  accountId   String?
   id          String   @id @default(uuid())
   orgId       String
   partyId     String
@@ -677,15 +682,24 @@ model ExpenseAllocation {
   @@index([orgId, batchId])
 }
 
+/// Money earned that is not a bird sale.
+///
+/// batchId is optional because not all of it belongs to a batch. Manure comes
+/// off a particular flock and is that batch's; leftover feed sold on is the
+/// farm's, because the batch it was bought for was never charged for it.
 model Revenue {
   id       String        @id @default(uuid())
   orgId    String
-  batchId  String
+  batchId  String?
+  farmId   String?
+  partyId  String?
   source String
   amount   Int
   currency String        @default("INR")
   date     DateTime
-  batch    Batch         @relation(fields: [batchId], references: [id])
+  notes    String?
+  batch    Batch?   @relation(fields: [batchId], references: [id])
+  party    Party?   @relation(fields: [partyId], references: [id])
 
   @@index([orgId, batchId])
 }
@@ -755,6 +769,7 @@ model Sale {
 /// it clears; what it cleared is in its allocations, and anything left over
 /// sits on account against the buyer's next lift.
 model BuyerPayment {
+  accountId   String?
   id          String   @id @default(uuid())
   orgId       String
   partyId     String
@@ -1070,4 +1085,89 @@ model HarvestOfferResponse {
 
   @@index([offerId])
   @@index([orgId])
+}
+
+// ─────────────────────────── money accounts ───────────────────────────
+
+/// What kind of thing an account is — a bank, a cash box, a UPI wallet, a loan.
+///
+/// A table rather than an enum because a farm's own vocabulary is the point:
+/// one owner keeps "Bank" and "Cash", another wants "Union Bank", "GPay" and
+/// "Hand loan". The seeded rows are marked system so a farm can rename them
+/// but cannot leave itself with nothing to classify an account as.
+model AccountType {
+  id         String    @id @default(uuid())
+  orgId      String
+  name       String
+  system     Boolean   @default(false)
+  sortOrder  Int       @default(0)
+  archivedAt DateTime?
+  accounts   Account[]
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([orgId, name])
+  @@index([orgId])
+}
+
+/// Where the farm's money actually sits.
+///
+/// One account covers most farms and is what a new org gets: every cost goes
+/// out of it, every receipt comes into it, and the owner tops it up when it
+/// runs short. Accounts nest so a farm that keeps separate books per location,
+/// or splits one bank account by purpose, can say so without a second system.
+///
+/// Only a leaf account holds entries. A master's balance is the sum of its
+/// children, and it has none of its own — the rule that stops the same rupee
+/// being counted once on the sub and again on the master.
+model Account {
+  id             String         @id @default(uuid())
+  orgId          String
+  name           String
+  typeId         String?
+  parentId       String?
+  /// Null means the account serves every farm, which is the default and what
+  /// most farms want. Set it only to ring-fence one location's money.
+  farmId         String?
+  isDefault      Boolean        @default(false)
+  openingBalance Int            @default(0)
+  openedOn       DateTime?
+  currency       String         @default("INR")
+  archivedAt     DateTime?
+  type           AccountType?   @relation(fields: [typeId], references: [id])
+  parent         Account?       @relation("AccountTree", fields: [parentId], references: [id])
+  children       Account[]      @relation("AccountTree")
+  entries        AccountEntry[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([orgId])
+  @@index([orgId, parentId])
+}
+
+/// One movement of money into or out of an account.
+///
+/// Only movements that nothing else already records get a row here: the
+/// opening balance, money the owner puts in or takes out, transfers between
+/// accounts, and income that is not a bird sale. Buyer and supplier payments
+/// are deliberately NOT copied in — they carry an accountId and are read where
+/// they already live, so there is one record of each rupee and no reconciling.
+model AccountEntry {
+  id         String   @id @default(uuid())
+  orgId      String
+  accountId  String
+  date       DateTime @default(now())
+  direction  String
+  kind       String
+  amount     Int
+  partyId    String?
+  /// Pairs the two legs of a transfer so neither can be read on its own.
+  transferId String?
+  notes      String?
+  account    Account  @relation(fields: [accountId], references: [id])
+  party      Party?   @relation(fields: [partyId], references: [id])
+  createdBy  String?
+  createdAt  DateTime @default(now())
+
+  @@index([orgId, accountId, date])
 }
