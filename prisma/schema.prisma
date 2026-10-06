@@ -261,6 +261,15 @@ enum AccountEntryKind {
   OTHER_EXPENSE
 }
 
+enum InputOrderStatus {
+  PLACED
+  ACCEPTED
+  DELIVERED
+  INVOICED
+  SETTLED
+  CANCELLED
+}
+
 enum RevenueSource {
   BIRD
   MANURE
@@ -1487,4 +1496,172 @@ model AccountEntry {
   createdAt  DateTime         @default(now())
 
   @@index([orgId, accountId, date])
+}
+
+// ───────────────────── the trading partner relationship ─────────────────────
+
+/// The farm's trading partner — who they call for chicks, feed and lifting.
+///
+/// A partnership exists before any deal does, which is why it cannot be
+/// derived from past orders the way FarmerRelationship is. A farm that has
+/// just signed up has a partner and no history.
+///
+/// Several are allowed because a farm may genuinely deal with more than one,
+/// but most have exactly one and the apps are built for that.
+model Partnership {
+  id           String    @id @default(uuid())
+  farmerOrgId  String
+  partnerOrgId String
+  status       String    @default("active")
+  startedAt    DateTime  @default(now())
+  endedAt      DateTime?
+  createdBy    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([farmerOrgId, partnerOrgId])
+  @@index([partnerOrgId, status])
+  @@index([farmerOrgId, status])
+}
+
+/// The published price for day-old chicks, one rate for the day.
+///
+/// The trade works off a single market rate, and hatcheries differ only on the
+/// discount they will give a trading partner. So the farm sees one price
+/// whoever it picks, and the partner's margin is the discount — which is why
+/// this is published platform-wide rather than quoted per hatchery.
+model ChickRate {
+  id            String   @id @default(uuid())
+  /// The day it applies to, at midnight UTC.
+  onDate        DateTime @unique
+  paisePerChick Int
+  publishedBy   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+/// An order a farm places on its trading partner.
+///
+/// This replaces the phone call and keeps its shape: the farm asks, the
+/// partner confirms what it can actually do, the load arrives, and the invoice
+/// follows what arrived. There is no quote step — the farm orders and the
+/// partner accepts, because that is what already happens.
+model InputOrder {
+  id            String           @id @default(uuid())
+  /// The trading partner who fulfils it, and owns this row.
+  orgId         String
+  farmerOrgId   String
+  kind          ProductKind
+
+  /// Chicks: the farm picks a hatchery, on reliability rather than price.
+  /// Held as a name as well as an id because hatcheries are not onboarded yet
+  /// and the choice still has to be recorded.
+  hatcheryOrgId String?
+  hatcheryName  String?
+
+  /// Feed: what was asked for. The partner sources it; the farm names no mill.
+  feedType      String?
+  brand         String?
+  bagSizeKg     Int?
+
+  /// Chicks or bags, as the farm asked for them.
+  qty           Int
+  needBy        DateTime?
+  notes         String?
+
+  /// What the farm pays per unit. For chicks this is the published rate held
+  /// at acceptance, so a later rate change cannot silently reprice an order
+  /// somebody already agreed to.
+  unitPrice     Int?
+
+  /// What the partner paid per unit, after the discount it negotiated. Never
+  /// shown to the farm — the difference is the partner's margin, and keeping
+  /// it private is the whole commercial basis of the relationship.
+  costPrice     Int?
+
+  /// Which batch it is for, when the farm knows. Chicks ordered before a batch
+  /// is placed have none yet.
+  batchId       String?
+
+  status        InputOrderStatus @default(PLACED)
+  delivery      InputDelivery?
+  createdBy     String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([orgId, status])
+  @@index([farmerOrgId, status])
+}
+
+/// What actually arrived, and what the partner decided to bill for.
+///
+/// The invoice follows the count, never the order. Chicks are counted off the
+/// lorry and some are dead or weak; feed is billed as delivered, not as asked
+/// for. Both are the same rule.
+///
+/// [billable] is the partner's own call, recorded rather than computed: dead
+/// and weak birds may be charged, not charged, or replaced on the next load,
+/// and which of those happens is a commercial decision between two businesses
+/// that this system must not make for them.
+model InputDelivery {
+  id          String     @id @default(uuid())
+  orderId     String     @unique
+  deliveredOn DateTime
+  /// Chicks counted on arrival, or bags off the lorry.
+  received    Int
+  dead        Int        @default(0)
+  weak        Int        @default(0)
+  /// Units the farm is charged for.
+  billable    Int
+  /// Units the partner agreed to send on the next load instead of charging.
+  replacing   Int        @default(0)
+  note        String?
+  order       InputOrder @relation(fields: [orderId], references: [id])
+  recordedBy  String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+/// What a trading partner takes, per trade.
+///
+/// Never shown to a farm. Chicks earn their margin from the hatchery discount
+/// instead, so a rate here is mostly for feed and lifting — but both shapes
+/// are allowed because partners price differently and the spec leaves the
+/// choice to them.
+///
+/// A row with no farmerOrgId is the partner's default for everyone; one with
+/// it overrides that for a single farm.
+model CommissionRate {
+  id          String   @id @default(uuid())
+  orgId       String
+  kind        String
+  farmerOrgId String?
+  /// A flat amount per unit, in paise.
+  perUnit     Int?
+  /// Or a percentage, in basis points. Exactly one of the two is set.
+  basisPoints Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([orgId, kind, farmerOrgId])
+}
+
+/// A lifter telling its partners how many birds it wants.
+///
+/// The other half of the lifting match: a farm says a batch is ready, a lifter
+/// says it needs birds, and the partner puts the two together. Without this
+/// the partner is guessing at demand.
+model LiftingRequirement {
+  id        String    @id @default(uuid())
+  orgId     String
+  birds     Int
+  wantBy    DateTime?
+  place     String?
+  notes     String?
+  status    String    @default("open")
+  createdBy String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([orgId, status])
 }
