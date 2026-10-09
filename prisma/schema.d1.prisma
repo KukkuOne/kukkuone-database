@@ -379,6 +379,10 @@ model Batch {
   weightRecords     WeightRecord[]
   feedConsumption   FeedConsumption[]
   medicineUsage     MedicineUsage[]
+  feedStock         FeedInventory[]
+  medicineStock     MedicineInventory[]
+  stockGiven        StockTransfer[]       @relation("StockTransferFrom")
+  stockReceived     StockTransfer[]       @relation("StockTransferTo")
   vaccinations      VaccinationSchedule[]
   expenses          Expense[]
   expenseAllocations ExpenseAllocation[]
@@ -458,6 +462,8 @@ model FeedInventory {
   id         String   @id @default(uuid())
   orgId      String
   farmId     String?
+  /// Which batch's store these kilos sit in. Null is farm-held stock.
+  batchId    String?
   feedItemId String
   kind String @default("PURCHASE")
   /// Required on an ADJUSTMENT: nothing is ever silently absorbed.
@@ -470,8 +476,12 @@ model FeedInventory {
   currency   String   @default("INR")
   date       DateTime @default(now())
   feedItem   FeedItem @relation(fields: [feedItemId], references: [id])
+  batch      Batch?   @relation(fields: [batchId], references: [id])
+  transferId String?
+  transfer   StockTransfer? @relation(fields: [transferId], references: [id], onDelete: Cascade)
 
   @@index([orgId, feedItemId])
+  @@index([orgId, batchId])
 }
 
 model FeedConsumption {
@@ -510,6 +520,8 @@ model MedicineInventory {
   id             String            @id @default(uuid())
   orgId          String
   farmId         String?
+  /// Which batch's store these units sit in. Null is farm-held stock.
+  batchId        String?
   medicineItemId String
   kind String @default("PURCHASE")
   /// Required on an ADJUSTMENT: nothing is ever silently absorbed.
@@ -523,8 +535,12 @@ model MedicineInventory {
   expiryDate     DateTime?
   date           DateTime          @default(now())
   medicineItem   MedicineItem      @relation(fields: [medicineItemId], references: [id])
+  batch          Batch?            @relation(fields: [batchId], references: [id])
+  transferId     String?
+  transfer       StockTransfer?    @relation(fields: [transferId], references: [id], onDelete: Cascade)
 
   @@index([orgId, medicineItemId])
+  @@index([orgId, batchId])
 }
 
 model MedicineUsage {
@@ -545,6 +561,29 @@ model MedicineUsage {
   medicineItem   MedicineItem @relation(fields: [medicineItemId], references: [id])
 
   @@index([orgId, batchId])
+}
+
+/// A carry-forward: stock left over on one batch handed to the next. Manual by
+/// design — see the note in schema.prisma. Charges nobody; the kilos change
+/// owner and whoever eats them pays at their own weighted average.
+model StockTransfer {
+  id           String              @id @default(uuid())
+  orgId        String
+  fromBatchId  String?
+  toBatchId    String?
+  date         DateTime            @default(now())
+  value        Int                 @default(0)
+  currency     String              @default("INR")
+  notes        String?
+  fromBatch    Batch?              @relation("StockTransferFrom", fields: [fromBatchId], references: [id])
+  toBatch      Batch?              @relation("StockTransferTo", fields: [toBatchId], references: [id])
+  feedLegs     FeedInventory[]
+  medicineLegs MedicineInventory[]
+  createdBy    String
+  createdAt    DateTime            @default(now())
+
+  @@index([orgId, fromBatchId])
+  @@index([orgId, toBatchId])
 }
 
 model VaccinationSchedule {

@@ -243,6 +243,15 @@ enum StockMovementKind {
   /// is farm income, not a credit against the batch it was bought for — that
   /// batch was never charged for it, because it was never issued.
   SALE
+  /// The two legs of a carry-forward: stock left over on a closing batch
+  /// handed to the batch that follows it. Never automatic — a farmer says so,
+  /// and both legs are written under one StockTransfer or neither is.
+  ///
+  /// Carried stock is NOT a cost to either batch. Nothing was consumed, so
+  /// nothing is charged; the kilos simply change owner, and the batch that
+  /// eventually eats them is the one that pays, at its own weighted average.
+  TRANSFER_OUT
+  TRANSFER_IN
 }
 
 enum EntryDirection {
@@ -612,6 +621,11 @@ model Batch {
   weightRecords     WeightRecord[]
   feedConsumption   FeedConsumption[]
   medicineUsage     MedicineUsage[]
+  /// Stock this batch owns — bought for it, carried into it, or counted on it.
+  feedStock         FeedInventory[]
+  medicineStock     MedicineInventory[]
+  stockGiven        StockTransfer[]       @relation("StockTransferFrom")
+  stockReceived     StockTransfer[]       @relation("StockTransferTo")
   vaccinations      VaccinationSchedule[]
   expenses          Expense[]
   expenseAllocations ExpenseAllocation[]
@@ -691,6 +705,14 @@ model FeedInventory {
   id         String   @id @default(uuid())
   orgId      String
   farmId     String?
+  /// Which batch's store these kilos sit in. Phase 1 buys feed for a flock,
+  /// not for a farm, so a purchase names the batch it was bought for and only
+  /// that batch may draw on it.
+  ///
+  /// Null is still meaningful and still used: stock held by the farm rather
+  /// than by any one flock — an opening balance, a bulk buy before placement,
+  /// or what is left once a batch has carried its surplus nowhere.
+  batchId    String?
   feedItemId String
   kind       StockMovementKind @default(PURCHASE)
   /// Required on an ADJUSTMENT: nothing is ever silently absorbed.
@@ -703,8 +725,14 @@ model FeedInventory {
   currency   String   @default("INR")
   date       DateTime @default(now())
   feedItem   FeedItem @relation(fields: [feedItemId], references: [id])
+  batch      Batch?   @relation(fields: [batchId], references: [id])
+  /// Set on both legs of a carry-forward, so the pair is always readable as
+  /// one event rather than as two unexplained movements.
+  transferId String?
+  transfer   StockTransfer? @relation(fields: [transferId], references: [id], onDelete: Cascade)
 
   @@index([orgId, feedItemId])
+  @@index([orgId, batchId])
 }
 
 model FeedConsumption {
@@ -743,6 +771,10 @@ model MedicineInventory {
   id             String            @id @default(uuid())
   orgId          String
   farmId         String?
+  /// Which batch's store these units sit in — the same rule as feed. A bottle
+  /// is bought for a flock, that flock is charged for what it doses, and what
+  /// is left is carried forward by hand or stays with the farm.
+  batchId        String?
   medicineItemId String
   kind           StockMovementKind @default(PURCHASE)
   /// Required on an ADJUSTMENT: nothing is ever silently absorbed.
@@ -756,8 +788,13 @@ model MedicineInventory {
   expiryDate     DateTime?
   date           DateTime          @default(now())
   medicineItem   MedicineItem      @relation(fields: [medicineItemId], references: [id])
+  batch          Batch?            @relation(fields: [batchId], references: [id])
+  /// Set on both legs of a carry-forward. See FeedInventory.transferId.
+  transferId     String?
+  transfer       StockTransfer?    @relation(fields: [transferId], references: [id], onDelete: Cascade)
 
   @@index([orgId, medicineItemId])
+  @@index([orgId, batchId])
 }
 
 model MedicineUsage {
@@ -778,6 +815,48 @@ model MedicineUsage {
   medicineItem   MedicineItem @relation(fields: [medicineItemId], references: [id])
 
   @@index([orgId, batchId])
+}
+
+/// A carry-forward: stock left over on one batch handed to the next.
+///
+/// Deliberately manual and deliberately explicit. A batch closes with eight
+/// bags and half a bottle in its store, and what happens to them is a decision
+/// somebody makes — the next flock may not be placed for a fortnight, may be
+/// fed a different brand, or the surplus may be sold on instead. Guessing it
+/// would quietly move cost between two batches' results, which is the one
+/// thing the whole batch-first model exists to prevent.
+///
+/// Either side may be the farm rather than a batch (a null). A batch closing
+/// into an empty shed hands its surplus back to the farm store and the next
+/// placement draws it out again, so nothing has to be held against a batch
+/// that does not exist yet.
+///
+/// A transfer charges nobody. Nothing was consumed, so no cost is booked on
+/// either side; the kilos change owner and the batch that eats them pays for
+/// them at its own weighted average. `value` is what they were worth on the
+/// day, carried for the audit trail and for the closing sheet to show what
+/// walked out of the batch rather than into the birds.
+model StockTransfer {
+  id           String              @id @default(uuid())
+  orgId        String
+  /// Who gave the stock. Null means it came out of the farm's own store.
+  fromBatchId  String?
+  /// Who received it. Null means it went back to the farm's own store.
+  toBatchId    String?
+  date         DateTime            @default(now())
+  /// Worth at the giving store's weighted average, in minor units.
+  value        Int                 @default(0)
+  currency     String              @default("INR")
+  notes        String?
+  fromBatch    Batch?              @relation("StockTransferFrom", fields: [fromBatchId], references: [id])
+  toBatch      Batch?              @relation("StockTransferTo", fields: [toBatchId], references: [id])
+  feedLegs     FeedInventory[]
+  medicineLegs MedicineInventory[]
+  createdBy    String
+  createdAt    DateTime            @default(now())
+
+  @@index([orgId, fromBatchId])
+  @@index([orgId, toBatchId])
 }
 
 model VaccinationSchedule {
