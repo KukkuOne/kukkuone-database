@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { createOrgRoles, ownerRoleKey } from '../src/rbac';
+import { DISEASES } from './diseases';
 
 const prisma = new PrismaClient();
 
@@ -66,7 +67,36 @@ async function main() {
   }
 }
 
+/**
+ * The disease catalogue, upserted on code so a renamed disease keeps its
+ * identity and every case already pointing at it still resolves.
+ */
+async function seedDiseases() {
+  for (const d of DISEASES) {
+    await prisma.disease.upsert({
+      where: { code: d.code },
+      update: {
+        name: d.name,
+        nameTe: d.nameTe ?? null,
+        summary: d.summary ?? null,
+        summaryTe: d.summaryTe ?? null,
+        notifiable: d.notifiable ?? false,
+      },
+      create: {
+        code: d.code,
+        name: d.name,
+        nameTe: d.nameTe ?? null,
+        summary: d.summary ?? null,
+        summaryTe: d.summaryTe ?? null,
+        notifiable: d.notifiable ?? false,
+      },
+    });
+  }
+  console.log(`✓ disease catalogue seeded: ${DISEASES.length} entries`);
+}
+
 main()
+  .then(() => seedDiseases())
   .then(() => prisma.$disconnect())
   .catch(async (e) => {
     console.error(e);

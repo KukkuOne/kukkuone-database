@@ -25,8 +25,88 @@ datasource db {
 /// DISTRIBUTOR became LIFTING_PARTNER — what it does is discover harvest-ready
 /// batches, record actual weight lifted and settle, which is lifting rather
 /// than trading.
+/// Where on the bird a finding is. Necropsy is systematic — a vet works
+/// through the same organs in the same order — so this is a closed list
+/// rather than free text. It is the difference between a case archive and a
+/// training set: "liver looked bad" labels nothing.
+enum Organ {
+  TRACHEA
+  LUNGS
+  AIR_SACS
+  PERICARDIUM
+  LIVER
+  SPLEEN
+  PROVENTRICULUS
+  GIZZARD
+  INTESTINE
+  CAECA
+  BURSA
+  KIDNEYS
+  JOINTS
+  SKIN
+  NERVES
+  CARCASS
+}
+
+/// What the vet saw there. Also closed, for the same reason.
+enum Lesion {
+  HAEMORRHAGE
+  CONGESTION
+  SWELLING
+  NECROSIS
+  CASEOUS_EXUDATE
+  FIBRIN
+  ASCITES
+  PALLOR
+  ATROPHY
+  ULCERATION
+  AIRSACCULITIS
+  NODULES
+  PARASITES
+  NORMAL
+}
+
+enum Severity {
+  MILD
+  MODERATE
+  SEVERE
+}
+
+/// How much the diagnosis is actually worth.
+///
+/// A vet's eye is not a laboratory. Training on a presumptive call and a PCR
+/// result as though they were the same evidence teaches the model to
+/// reproduce one vet's hunches, so the grade is recorded and the trainer can
+/// weight or exclude by it.
+enum EvidenceGrade {
+  PRESUMPTIVE
+  POST_MORTEM
+  LAB_CONFIRMED
+}
+
+/// What kind of picture it is. A photo of droppings and a photo of an opened
+/// carcass are different problems for a model and must not be pooled.
+enum MediaKind {
+  BIRD
+  DROPPINGS
+  FLOCK
+  SHED
+  POST_MORTEM
+  DOCUMENT
+}
+
+enum VetCaseStatus {
+  RAISED
+  TRIAGED
+  VISIT_NEEDED
+  VISITED
+  CLOSED
+  WITHDRAWN
+}
+
 enum Capability {
   FARMER
+  VET
   HATCHERY
   FEED_SUPPLIER
   TRADING_PARTNER
@@ -205,6 +285,7 @@ enum ExpenseCategory {
 /// people, and collapsing them loses who to chase for the money.
 enum PartyKind {
   HATCHERY
+  VET
   FEED_SUPPLIER
   MEDICINE_SUPPLIER
   BUYER
@@ -1664,4 +1745,208 @@ model LiftingRequirement {
   updatedAt DateTime  @updatedAt
 
   @@index([orgId, status])
+}
+
+// ─────────────────────────── asking a vet ───────────────────────────
+
+/// A farm asking a vet to look at something.
+///
+/// The product is the consultation. The training data is a by-product, and
+/// that order matters: a farmer raises a case because birds are dying today,
+/// not to improve a model, and anything that makes the asking slower to serve
+/// the dataset will simply stop being used.
+///
+/// Every number the farm already records is attached by reference rather than
+/// copied — the batch carries its own age, mortality curve, feed and water —
+/// so a case is the question, not a snapshot of the farm.
+model VetCase {
+  id      String  @id @default(uuid())
+  orgId   String
+  batchId String?
+  farmId  String?
+
+  /// What the farmer noticed, in their own words. Kept deliberately: it is
+  /// the only part written by the person who was actually in the shed, and
+  /// the symptom vocabulary they use is itself worth learning from.
+  complaint String
+
+  /// Birds affected and dead when the case was raised. Recorded here rather
+  /// than read from the daily log because a case is often raised mid-day,
+  /// before that day's log exists.
+  birdsAffected Int?
+  birdsDead     Int?
+
+  status VetCaseStatus @default(RAISED)
+
+  /// The vet who took it. Null until somebody does.
+  vetOrgId  String?
+  vetUserId String?
+
+  /// Consent to use this case's images for training, asked separately from
+  /// consent to show them to the vet.
+  ///
+  /// Disease history is commercially damaging — a farm known to have had
+  /// Newcastle loses buyers — so "my vet may see this" and "anyone may train
+  /// on this" are two different questions and are never bundled into one tick.
+  trainingConsent Boolean   @default(false)
+  consentAt       DateTime?
+
+  media     CaseMedia[]
+  findings  CaseFinding[]
+  diagnoses CaseDiagnosis[]
+  visits    VetVisit[]
+
+  raisedBy  String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  closedAt  DateTime?
+
+  @@index([orgId, status])
+  @@index([vetOrgId, status])
+  @@index([batchId])
+}
+
+/// One picture on a case.
+///
+/// [storageKey] is an object key, never a URL: the bucket is private and the
+/// app asks for a signed link when it needs one. A stored URL would expire in
+/// the database and rot there.
+model CaseMedia {
+  id         String    @id @default(uuid())
+  caseId     String
+  kind       MediaKind
+  storageKey String
+  mimeType   String
+  bytes      Int?
+  width      Int?
+  height     Int?
+
+  /// When the picture was taken, which is not when it was uploaded. A farmer
+  /// photographs in a shed with no signal and the upload lands hours later.
+  takenAt DateTime?
+
+  /// Set on a post-mortem photo: which bird of the batch this was.
+  birdRef String?
+  note    String?
+
+  case       VetCase       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  findings   CaseFinding[]
+  uploadedBy String?
+  createdAt  DateTime      @default(now())
+
+  @@index([caseId, kind])
+}
+
+/// One thing the vet saw, where they saw it, and on which picture.
+///
+/// This is the label. [organ], [lesion] and [severity] are closed vocabularies
+/// so the set is trainable the day it is written; [region] is the box drawn on
+/// the image, which makes it detection data rather than only classification.
+///
+/// A finding without a [mediaId] is still worth keeping — a vet can report
+/// airsacculitis they saw and did not photograph, and a record that only
+/// admits what was photographed quietly teaches the model that unphotographed
+/// lesions do not exist.
+model CaseFinding {
+  id      String  @id @default(uuid())
+  caseId  String
+  mediaId String?
+
+  organ    Organ
+  lesion   Lesion
+  severity Severity @default(MODERATE)
+
+  /// The marked area, as {x, y, w, h} in fractions of the image, or a polygon
+  /// under {points: [...]}. Fractions rather than pixels so a resize or a
+  /// thumbnail does not invalidate every label ever drawn.
+  region Json?
+
+  /// The vet's own words about this finding. Alongside the structure, never
+  /// instead of it.
+  note String?
+
+  case      VetCase    @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  media     CaseMedia? @relation(fields: [mediaId], references: [id])
+  notedBy   String?
+  createdAt DateTime   @default(now())
+
+  @@index([caseId])
+  @@index([organ, lesion])
+}
+
+/// What the vet concluded, and how sure the evidence makes them.
+///
+/// A case may carry more than one: a differential is a real clinical answer,
+/// and forcing a single disease would make the vet pick one and the dataset
+/// believe them.
+model CaseDiagnosis {
+  id     String @id @default(uuid())
+  caseId String
+
+  /// The disease, from the catalogue, so two vets spelling Gumboro
+  /// differently do not become two diseases.
+  diseaseId String?
+  /// What the vet called it when the catalogue has no entry. Reviewed later;
+  /// a growing pile of these is how the catalogue learns what it is missing.
+  freeName  String?
+
+  evidence EvidenceGrade @default(PRESUMPTIVE)
+  /// Ranked when there is more than one: 1 is the vet's leading call.
+  rank     Int           @default(1)
+
+  /// What to do about it, for the farmer to read.
+  advice String?
+
+  case        VetCase  @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  disease     Disease? @relation(fields: [diseaseId], references: [id])
+  diagnosedBy String?
+  createdAt   DateTime @default(now())
+
+  @@index([caseId])
+  @@index([diseaseId])
+}
+
+/// The disease catalogue.
+///
+/// Seeded rather than typed, so that findings, diagnoses and eventually model
+/// outputs all name the same thing. [notifiable] is not decoration: Newcastle
+/// and avian influenza must be reported to the authorities in India, and an
+/// app that files a confirmed case quietly is part of the problem.
+model Disease {
+  id         String          @id @default(uuid())
+  code       String          @unique
+  name       String
+  nameTe     String?
+  /// What it usually looks like, for the vet's reference and the farmer's.
+  summary    String?
+  summaryTe  String?
+  notifiable Boolean         @default(false)
+  diagnoses  CaseDiagnosis[]
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+}
+
+/// A vet going to the farm.
+///
+/// Separate from the case because a visit has its own logistics — a date, a
+/// person travelling, a fee — and because the post-mortems done on the visit
+/// are the richest images in the whole set and deserve their own count.
+model VetVisit {
+  id            String    @id @default(uuid())
+  caseId        String
+  scheduledFor  DateTime?
+  visitedOn     DateTime?
+  /// How many birds were opened. The post-mortem photos hang off the case's
+  /// media; this is the count the vet reports, which may differ from how many
+  /// they managed to photograph.
+  birdsExamined Int       @default(0)
+  summary       String?
+  feePaise      Int?
+
+  case      VetCase  @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  vetUserId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([caseId])
 }
